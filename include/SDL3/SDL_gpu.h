@@ -3909,6 +3909,9 @@ extern SDL_DECLSPEC Uint32 SDLCALL SDL_CalculateGPUTextureFormatSize(
     Uint32 height,
     Uint32 depth_or_layer_count);
 
+extern SDL_DECLSPEC Uint32 SDLCALL SDL_QueryPoolBegin(
+    SDL_GPUDevice *device);
+
 #ifdef SDL_PLATFORM_GDK
 
 /**

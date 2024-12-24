@@ -2919,3 +2919,9 @@ Uint32 SDL_CalculateGPUTextureFormatSize(
     Uint32 blocksPerColumn = (height + blockHeight - 1) / blockHeight;
     return depth_or_layer_count * blocksPerRow * blocksPerColumn * SDL_GPUTextureFormatTexelBlockSize(format);
 }
+
+Uint32 SDL_QueryPoolBegin(SDL_GPUDevice *device)
+{
+    device->QueryFence()
+    return 0;
+}
