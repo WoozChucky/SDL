@@ -523,6 +523,15 @@ typedef struct MetalUniformBuffer
     Uint32 drawOffset;
 } MetalUniformBuffer;
 
+// Query pool for Metal: backed by an MTLBuffer for visibility results
+// Note: Timestamps are not currently supported in this backend.
+typedef struct MetalQueryPool
+{
+    SDL_GPUQueryType type;
+    Uint32 count;
+    id<MTLBuffer> visibilityBuffer; // 8 bytes per query result
+} MetalQueryPool;
+
 typedef struct MetalRenderer MetalRenderer;
 
 typedef struct MetalCommandBuffer
@@ -3079,6 +3088,156 @@ static void METAL_Blit(
         &renderer->blitPipelines,
         &renderer->blitPipelineCount,
         &renderer->blitPipelineCapacity);
+}
+
+// Queries
+
+static SDL_GPUQueryPool* METAL_CreateQueryPool(
+    SDL_GPURenderer *driverData,
+    SDL_GPUQueryType type,
+    Uint32 count,
+    const char* debugName)
+{
+    @autoreleasepool {
+        MetalRenderer *renderer = (MetalRenderer *)driverData;
+
+        if (type == SDL_GPU_QUERY_TIMESTAMP) {
+            SDL_SetError("Metal: timestamp queries are not supported by this backend");
+            return NULL;
+        }
+
+        MetalQueryPool *pool = (MetalQueryPool *)SDL_calloc(1, sizeof(MetalQueryPool));
+        if (!pool) {
+            SDL_OutOfMemory();
+            return NULL;
+        }
+        pool->type = type;
+        pool->count = count;
+
+        NSUInteger bytes = (NSUInteger)count * 8; // 8 bytes per visibility result
+        id<MTLBuffer> buf = [renderer->device newBufferWithLength:bytes options:MTLResourceStorageModeShared];
+        if (!buf) {
+            SDL_free(pool);
+            SET_STRING_ERROR_AND_RETURN("Metal: failed to create visibility result buffer", NULL);
+        }
+        if (renderer->debugMode && debugName) {
+            buf.label = [NSString stringWithUTF8String:debugName];
+        }
+        pool->visibilityBuffer = buf;
+
+        return (SDL_GPUQueryPool *)pool;
+    }
+}
+
+static void METAL_ReleaseQueryPool(
+    SDL_GPURenderer *driverData,
+    SDL_GPUQueryPool *queryPool)
+{
+    @autoreleasepool {
+        (void)driverData;
+        MetalQueryPool *pool = (MetalQueryPool *)queryPool;
+        if (!pool) {
+            return;
+        }
+        // ARC/autorelease will handle visibilityBuffer; if not using ARC this would need a release
+        pool->visibilityBuffer = nil;
+        SDL_free(pool);
+    }
+}
+
+static void METAL_BeginQuery(
+    SDL_GPUCommandBuffer *commandBuffer,
+    SDL_GPUQueryPool *queryPool,
+    Uint32 query)
+{
+    @autoreleasepool {
+        MetalCommandBuffer *cb = (MetalCommandBuffer *)commandBuffer;
+        MetalQueryPool *pool = (MetalQueryPool *)queryPool;
+        if (!pool) { return; }
+
+        if (pool->type == SDL_GPU_QUERY_TIMESTAMP) {
+            // Not supported in this backend
+            return;
+        }
+
+        if (!cb->renderEncoder) {
+            // Must be inside a render pass for visibility queries; no-op for robustness
+            return;
+        }
+
+        MTLVisibilityResultMode mode = (pool->type == SDL_GPU_QUERY_BINARY_OCCLUSION)
+            ? MTLVisibilityResultModeBoolean
+            : MTLVisibilityResultModeCounting;
+
+        const NSUInteger offset = ((NSUInteger)query) * 8; // 8B per query
+        [cb->renderEncoder setVisibilityResultMode:mode offset:offset];
+    }
+}
+
+static void METAL_EndQuery(
+    SDL_GPUCommandBuffer *commandBuffer,
+    SDL_GPUQueryPool *queryPool,
+    Uint32 query)
+{
+    @autoreleasepool {
+        (void)query;
+        MetalCommandBuffer *cb = (MetalCommandBuffer *)commandBuffer;
+        MetalQueryPool *pool = (MetalQueryPool *)queryPool;
+        if (!pool) { return; }
+
+        if (pool->type == SDL_GPU_QUERY_TIMESTAMP) {
+            // Not supported in this backend
+            return;
+        }
+
+        if (!cb->renderEncoder) {
+            return;
+        }
+
+        [cb->renderEncoder setVisibilityResultMode:MTLVisibilityResultModeDisabled offset:0];
+    }
+}
+
+static void METAL_CopyQueryResultsToBuffer(
+    SDL_GPUCommandBuffer *commandBuffer,
+    SDL_GPUQueryPool *queryPool,
+    Uint32 firstQuery,
+    Uint32 queryCount,
+    const SDL_GPUBufferLocation *destination)
+{
+    @autoreleasepool {
+        MetalCommandBuffer *cb = (MetalCommandBuffer *)commandBuffer;
+        MetalRenderer *renderer = cb->renderer;
+        MetalQueryPool *pool = (MetalQueryPool *)queryPool;
+        MetalBufferContainer *dstContainer = (MetalBufferContainer *)destination->buffer;
+
+        if (!pool || !dstContainer) {
+            return;
+        }
+
+        if (pool->type == SDL_GPU_QUERY_TIMESTAMP) {
+            // Not supported yet
+            return;
+        }
+
+        if (!cb->blitEncoder) {
+            cb->blitEncoder = [cb->handle blitCommandEncoder];
+        }
+
+        MetalBuffer *dst = METAL_INTERNAL_PrepareBufferForWrite(renderer, dstContainer, false);
+
+        for (Uint32 i = 0; i < queryCount; i += 1) {
+            const NSUInteger srcOffset = ((NSUInteger)(firstQuery + i)) * 8; // 8B per query in source
+            const NSUInteger dstOffset = (NSUInteger)destination->offset + ((NSUInteger)i) * 4; // 4B per query in dest
+            [cb->blitEncoder copyFromBuffer:pool->visibilityBuffer
+                                sourceOffset:srcOffset
+                                    toBuffer:dst->handle
+                           destinationOffset:dstOffset
+                                        size:4];
+        }
+
+        METAL_INTERNAL_TrackBuffer(cb, dst);
+    }
 }
 
 // Compute State
