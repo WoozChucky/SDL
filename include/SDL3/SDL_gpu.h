@@ -532,6 +532,21 @@ typedef struct SDL_GPUGraphicsPipeline SDL_GPUGraphicsPipeline;
 typedef struct SDL_GPUCommandBuffer SDL_GPUCommandBuffer;
 
 /**
+ * An opaque handle representing a query pool.
+ *
+ * Used to perform occlusion and timestamp queries.
+ *
+ * \since This struct is available since SDL 3.x.0.
+ *
+ * \sa SDL_CreateGPUQueryPool
+ * \sa SDL_ReleaseGPUQueryPool
+ * \sa SDL_BeginGPUQuery
+ * \sa SDL_EndGPUQuery
+ * \sa SDL_CopyGPUQueryResultsToBuffer
+ */
+typedef struct SDL_GPUQueryPool SDL_GPUQueryPool;
+
+/**
  * An opaque handle representing a render pass.
  *
  * This handle is transient and should not be held or referenced after
@@ -1355,6 +1370,33 @@ typedef enum SDL_GPUSwapchainComposition
     SDL_GPU_SWAPCHAINCOMPOSITION_HDR10_ST2084
 } SDL_GPUSwapchainComposition;
 
+/**
+ * Specifies the type of a query.
+ *
+ * Timestamp queries are used to record a timestamp in the GPU command stream in ticks.
+ * They are recorded when calling SDL_QueryGPUBegin or SDL_QueryGPUEnd.
+ * Once read back, you can compute a delta time using SDL_GetGPUTimestampFrequency.
+ *
+ * Occlusion queries are used to determine the number of samples that pass the depth and stencil tests
+ * for draw calls that happen between a SDL_QueryGPUBegin and SDL_QueryGPUEnd pair.
+ * The binary occlusion query is a simplified version of the occlusion query that records a 1 if ANY
+ * sample passes the depth and stencil tests, and a 0 otherwise.
+ *
+ * \since This enum is available since SDL 3.2.x.
+ *
+ * \sa SDL_CreateGPUQuery
+ * \sa SDL_QueryGPUBegin
+ * \sa SDL_QueryGPUEnd
+ * \sa SDL_CopyGPUQueryResultToBuffer
+ * \sa SDL_GetGPUTimestampFrequency
+ */
+typedef enum
+{
+    SDL_GPU_QUERY_TIMESTAMP,
+    SDL_GPU_QUERY_OCCLUSION,
+    SDL_GPU_QUERY_BINARY_OCCLUSION
+} SDL_GPUQueryType;
+
 /* Structures */
 
 /**
@@ -1961,6 +2003,21 @@ typedef struct SDL_GPUComputePipelineCreateInfo
 
     SDL_PropertiesID props;                 /**< A properties ID for extensions. Should be 0 if no extensions are needed. */
 } SDL_GPUComputePipelineCreateInfo;
+
+/**
+ * A structure specifying the parameters of a query pool.
+ *
+ * \since This struct is available since SDL 3.x.x.
+ *
+ * \sa SDL_CreateGPUQueryPool
+ */
+typedef struct SDL_GPUQueryPoolCreateInfo
+{
+    SDL_GPUQueryType type;             /**< The type of query to be created. */
+    Uint32 count;                      /**< The number of queries to be created. */
+
+    SDL_PropertiesID props;             /**< A properties ID for extensions. Should be 0 if no extensions are needed. */
+} SDL_GPUQueryPoolCreateInfo;
 
 /**
  * A structure specifying the parameters of a color target used by a render
@@ -3127,6 +3184,125 @@ extern SDL_DECLSPEC void SDLCALL SDL_PushGPUComputeUniformData(
     Uint32 slot_index,
     const void *data,
     Uint32 length);
+
+/* Queries */
+
+/**
+ * Creates a query pool object to be used for queries.
+ * Queries are then exectured using some query index from the pool.
+ *
+ * \param device a GPU Context.
+ * \param createinfo a struct describing the state of the query pool to create.
+ * \returns a query pool object on success, or NULL on failure; call
+ *          SDL_GetError() for more information.
+ *
+ * \since This function is available since SDL 3.x.x.
+ *
+ * \sa SDL_BeginGPUQuery
+ * \sa SDL_EndGPUQuery
+ * \sa SDL_CopyGPUQueryResultsToBuffer
+ * \sa SDL_ReleaseGPUQueryPool
+ */
+extern SDL_DECLSPEC SDL_GPUQueryPool *SDLCALL SDL_CreateGPUQueryPool(
+    SDL_GPUDevice *device,
+    const SDL_GPUQueryPoolCreateInfo *createinfo);
+
+#define SDL_PROP_GPU_QUERYPOOL_CREATE_NAME_STRING "SDL.gpu.querypool.create.name"
+
+/**
+* Frees the given query pool as soon as it is safe to do so.
+*
+* You must not reference the query pool after calling this function.
+*
+* \param device a GPU context.
+* \param query_pool a query pool to be destroyed.
+*
+* \since This function is available since SDL 3.x.x.
+*/
+extern SDL_DECLSPEC void SDLCALL SDL_ReleaseGPUQueryPool(
+    SDL_GPUDevice *device,
+    SDL_GPUQueryPool *query_pool);
+
+/**
+*
+* Begin a GPU query.
+*
+* For occlusion queries, this will begin a query that will count the number of
+* visible samples, or record a binary visibility result. A call to SDL_EndGPUQuery
+* should be placed after the draw calls that are being queried, with the same query index.
+*
+* For timestamp queries, this will record a timestamp in the query pool at the given index.
+*
+* \param command_buffer a command buffer.
+* \param query_pool a query pool to record the query in.
+* \param query_index the index of the query in the query pool.
+*
+* \since This function is available since SDL 3.2.x.
+*
+* \sa SDL_EndGPUQuery
+*/
+extern SDL_DECLSPEC void SDLCALL SDL_BeginGPUQuery(
+    SDL_GPUCommandBuffer *command_buffer,
+    SDL_GPUQueryPool *query_pool,
+    Uint32 query_index);
+
+/**
+ *
+ * End a GPU query. The results can be copied to a buffer with SDL_CopyGPUQueryResultsToBuffer.
+ *
+ * For occlusion queries, this will end a query and stop counting and recording visible samples.
+ *
+ * For timestamp queries, this will record a timestamp in the query pool at the given index.
+ *
+ * \param command_buffer a command buffer.
+ * \param query_pool a query pool to record the query in.
+ * \param query_index the index of the query in the query pool.
+ *
+ * \since This function is available since SDL 3.2.x.
+ *
+ * \sa SDL_CopyGPUQueryResultsToBuffer
+ */
+extern SDL_DECLSPEC void SDLCALL SDL_EndGPUQuery(
+    SDL_GPUCommandBuffer *command_buffer,
+    SDL_GPUQueryPool *query_pool,
+    Uint32 query_index);
+
+/**
+* Copies the query results from a query pool to a buffer.
+*
+* This data is not guaranteed to be copied until the command buffer fence is
+* signaled. The buffer must be large enough to hold the query results.
+* For occlusion queries, this size is count * sizeof(Uint32).
+* For timestamp queries, this size is count * sizeof(Uint64).
+*
+* \param copy_pass a copy pass handle.
+* \param source the source query pool.
+* \param start_index the index of the first query result to copy.
+* \param count the number of query results to copy.
+* \param destination the destination buffer with offset.
+*
+* \since This function is available since SDL 3.2.x.
+*/
+extern SDL_DECLSPEC void SDLCALL SDL_CopyGPUQueryResultsToBuffer(
+    SDL_GPUCopyPass *copy_pass,
+    SDL_GPUQueryPool *source,
+    Uint32 start_index,
+    Uint32 count,
+    const SDL_GPUBufferLocation *destination);
+
+/**
+* Gets the GPU ticks per second, needed for converting timestamp query ticks into time.
+*
+* Delta time in seconds between two queries 'start' and 'end' can be computed as:
+* dt = (start - end) / double(frequency)
+*
+* \param device a GPU context.
+* \returns the number of ticks per second for a given GPU device.
+*
+ * \since This function is available since SDL 3.2.x.
+ */
+extern SDL_DECLSPEC Uint64 SDLCALL SDL_GetGPUTimestampFrequency(
+    SDL_GPUDevice *device);
 
 /* Graphics State */
 
