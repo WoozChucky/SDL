@@ -163,6 +163,7 @@ static const IID D3D_IID_ID3D12PipelineState = { 0x765a30f3, 0xf624, 0x4c6f, { 0
 static const IID D3D_IID_ID3D12Debug = { 0x344488b7, 0x6846, 0x474b, { 0xb9, 0x89, 0xf0, 0x27, 0x44, 0x82, 0x45, 0xe0 } };
 static const IID D3D_IID_ID3D12InfoQueue = { 0x0742a90b, 0xc387, 0x483f, { 0xb9, 0x46, 0x30, 0xa7, 0xe4, 0xe6, 0x14, 0x58 } };
 static const IID D3D_IID_ID3D12InfoQueue1 = { 0x2852dd88, 0xb484, 0x4c0c, { 0xb6, 0xb1, 0x67, 0x16, 0x85, 0x00, 0xe6, 0x00 } };
+static const IID D3D_IID_ID3D12QueryHeap = { 0x0d9658ae, 0xed45, 0x469e, { 0xa6, 0x1d, 0x97, 0x0e, 0xc5, 0x83, 0xca, 0xb4 } };
 
 // Enums
 
@@ -1184,6 +1185,13 @@ struct D3D12UniformBuffer
     Uint32 writeOffset;
     Uint32 drawOffset;
 };
+
+typedef struct D3D12QueryPool
+{
+    ID3D12QueryHeap *heap;
+    SDL_GPUQueryType type;
+    Uint32 count;
+} D3D12QueryPool;
 
 // Forward function declarations
 
@@ -5311,6 +5319,176 @@ static void D3D12_EndRenderPass(
     SDL_zeroa(d3d12CommandBuffer->fragmentSamplerDescriptorHandles);
     SDL_zeroa(d3d12CommandBuffer->fragmentStorageTextureDescriptorHandles);
     SDL_zeroa(d3d12CommandBuffer->fragmentStorageBufferDescriptorHandles);
+}
+
+static SDL_GPUQueryPool* D3D12_CreateQueryPool(
+    SDL_GPURenderer *driverData,
+    SDL_GPUQueryType type,
+    Uint32 count,
+    const char* debugName)
+{
+    D3D12Renderer *renderer = (D3D12Renderer *)driverData;
+    HRESULT res;
+
+    D3D12QueryPool *pool = (D3D12QueryPool *)SDL_calloc(1, sizeof(D3D12QueryPool));
+    if (pool == NULL) {
+        SDL_OutOfMemory();
+        return NULL;
+    }
+
+    D3D12_QUERY_HEAP_TYPE heapType;
+    switch (type) {
+        case SDL_GPU_QUERY_TIMESTAMP:
+            heapType = D3D12_QUERY_HEAP_TYPE_TIMESTAMP;
+            break;
+        case SDL_GPU_QUERY_OCCLUSION:
+        case SDL_GPU_QUERY_BINARY_OCCLUSION:
+            heapType = D3D12_QUERY_HEAP_TYPE_OCCLUSION;
+            break;
+        default:
+            SDL_free(pool);
+            SDL_SetError("Unsupported query type");
+            return NULL;
+    }
+
+    D3D12_QUERY_HEAP_DESC desc;
+    SDL_zero(desc);
+    desc.Type = heapType;
+    desc.Count = count;
+    desc.NodeMask = 0;
+
+    res = ID3D12Device_CreateQueryHeap(
+        renderer->device,
+        &desc,
+        D3D_GUID(D3D_IID_ID3D12QueryHeap),
+        (void **)&pool->heap);
+    CHECK_D3D12_ERROR_AND_RETURN("ID3D12Device_CreateQueryHeap", NULL);
+
+    pool->type = type;
+    pool->count = count;
+
+    (void)debugName; // TODO: set name via ID3D12Object::SetName if desired
+
+    return (SDL_GPUQueryPool *)pool;
+}
+
+static void D3D12_ReleaseQueryPool(
+    SDL_GPURenderer *driverData,
+    SDL_GPUQueryPool *queryPool)
+{
+    (void)driverData;
+    D3D12QueryPool *pool = (D3D12QueryPool *)queryPool;
+    if (pool == NULL) {
+        return;
+    }
+    if (pool->heap) {
+        ID3D12QueryHeap_Release(pool->heap);
+        pool->heap = NULL;
+    }
+    SDL_free(pool);
+}
+
+static void D3D12_BeginQuery(
+    SDL_GPUCommandBuffer *commandBuffer,
+    SDL_GPUQueryPool *queryPool,
+    Uint32 query)
+{
+    D3D12CommandBuffer *d3d12CommandBuffer = (D3D12CommandBuffer *)commandBuffer;
+    D3D12QueryPool *pool = (D3D12QueryPool *)queryPool;
+
+    if (pool->type == SDL_GPU_QUERY_TIMESTAMP) {
+        // Timestamps are written on EndQuery
+        return;
+    }
+
+    D3D12_QUERY_TYPE qtype = (pool->type == SDL_GPU_QUERY_OCCLUSION)
+        ? D3D12_QUERY_TYPE_OCCLUSION
+        : D3D12_QUERY_TYPE_BINARY_OCCLUSION;
+
+    ID3D12GraphicsCommandList_BeginQuery(
+        d3d12CommandBuffer->graphicsCommandList,
+        pool->heap,
+        qtype,
+        query);
+}
+
+static void D3D12_EndQuery(
+    SDL_GPUCommandBuffer *commandBuffer,
+    SDL_GPUQueryPool *queryPool,
+    Uint32 query)
+{
+    D3D12CommandBuffer *d3d12CommandBuffer = (D3D12CommandBuffer *)commandBuffer;
+    D3D12QueryPool *pool = (D3D12QueryPool *)queryPool;
+
+    D3D12_QUERY_TYPE qtype;
+    if (pool->type == SDL_GPU_QUERY_TIMESTAMP) {
+        qtype = D3D12_QUERY_TYPE_TIMESTAMP;
+    } else if (pool->type == SDL_GPU_QUERY_OCCLUSION) {
+        qtype = D3D12_QUERY_TYPE_OCCLUSION;
+    } else {
+        qtype = D3D12_QUERY_TYPE_BINARY_OCCLUSION;
+    }
+
+    ID3D12GraphicsCommandList_EndQuery(
+        d3d12CommandBuffer->graphicsCommandList,
+        pool->heap,
+        qtype,
+        query);
+}
+
+static void D3D12_CopyQueryResultsToBuffer(
+    SDL_GPUCommandBuffer *commandBuffer,
+    SDL_GPUQueryPool *queryPool,
+    Uint32 firstQuery,
+    Uint32 queryCount,
+    const SDL_GPUBufferLocation *destination)
+{
+    D3D12CommandBuffer *d3d12CommandBuffer = (D3D12CommandBuffer *)commandBuffer;
+    D3D12QueryPool *pool = (D3D12QueryPool *)queryPool;
+    D3D12BufferContainer *dstContainer = (D3D12BufferContainer *)destination->buffer;
+
+    D3D12Buffer *dstBuffer = D3D12_INTERNAL_PrepareBufferForWrite(
+        d3d12CommandBuffer,
+        dstContainer,
+        false,
+        D3D12_RESOURCE_STATE_COPY_DEST);
+
+    D3D12_QUERY_TYPE qtype;
+    if (pool->type == SDL_GPU_QUERY_TIMESTAMP) {
+        qtype = D3D12_QUERY_TYPE_TIMESTAMP;
+    } else if (pool->type == SDL_GPU_QUERY_OCCLUSION) {
+        qtype = D3D12_QUERY_TYPE_OCCLUSION;
+    } else {
+        qtype = D3D12_QUERY_TYPE_BINARY_OCCLUSION;
+    }
+
+    ID3D12GraphicsCommandList_ResolveQueryData(
+        d3d12CommandBuffer->graphicsCommandList,
+        pool->heap,
+        qtype,
+        firstQuery,
+        queryCount,
+        dstBuffer->handle,
+        destination->offset);
+
+    D3D12_INTERNAL_BufferTransitionToDefaultUsage(
+        d3d12CommandBuffer,
+        D3D12_RESOURCE_STATE_COPY_DEST,
+        dstBuffer);
+
+    D3D12_INTERNAL_TrackBuffer(d3d12CommandBuffer, dstBuffer);
+}
+
+static Uint64 D3D12_GetTimestampFrequency(
+    SDL_GPURenderer *driverData)
+{
+    D3D12Renderer *renderer = (D3D12Renderer *)driverData;
+    UINT64 freq = 0;
+    HRESULT res = ID3D12CommandQueue_GetTimestampFrequency(renderer->commandQueue, &freq);
+    if (FAILED(res)) {
+        return 0;
+    }
+    return (Uint64)freq;
 }
 
 // Compute Pass
