@@ -5328,7 +5328,6 @@ static SDL_GPUQueryPool* D3D12_CreateQueryPool(
     const char* debugName)
 {
     D3D12Renderer *renderer = (D3D12Renderer *)driverData;
-    HRESULT res;
 
     D3D12QueryPool *pool = (D3D12QueryPool *)SDL_calloc(1, sizeof(D3D12QueryPool));
     if (pool == NULL) {
@@ -5357,7 +5356,7 @@ static SDL_GPUQueryPool* D3D12_CreateQueryPool(
     desc.Count = count;
     desc.NodeMask = 0;
 
-    res = ID3D12Device_CreateQueryHeap(
+    HRESULT res = ID3D12Device_CreateQueryHeap(
         renderer->device,
         &desc,
         D3D_GUID(D3D_IID_ID3D12QueryHeap),
